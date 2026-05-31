@@ -85,34 +85,13 @@ It repeats this loop as many times as its time budget allows, then plays the mov
 
 ## Tech stack
 
-There is no single "best mobile language" — for a game, the **engine and approach matter more than the language**. The recommended path here separates fast experimentation from polished delivery.
-
-### Phase A — Engine prototype (desktop)
-
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Language | **Python 3.11+** | Fastest to experiment with rules and AI; easiest to debug. |
-| AI | **Custom MCTS** (pure Python) | ~150–250 lines; no heavy dependencies. |
-| Testing | **pytest** | Lock the rules down with unit tests before porting. |
-
-You prove the game is fun and the AI plays well here — **before** writing any app code.
-
-### Phase B — Mobile app
-
-**Recommended: Flutter (Dart).** Lodestone is a clean tap-the-grid board game, which Flutter handles beautifully: one codebase ships to both **iOS and Android**, the UI is fast to build, and you can rewrite the MCTS engine in Dart so the whole app is a single language with no native bridge.
-
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Framework | **Flutter** | Single codebase → iOS + Android. |
-| Language | **Dart** | UI and the ported MCTS engine live together. |
-| State | **Riverpod** or built-in `setState` | Manage game/board state cleanly. |
-| Local storage | **shared_preferences** / **Hive** | Save settings, stats, progress. |
-
-**Alternative: Godot (GDScript or C#).** Choose this instead if you want richer animation, sound, and "juice." Also free and exports to both platforms. Slightly more game-engine overhead than Flutter for what is essentially a grid board game.
-
-### Why prototype in Python first
-
-Iterating on rules in Python takes minutes; iterating inside a half-built mobile app takes hours. Get the fun and the AI right cheaply, then port a *known-good* engine into Flutter.
+| Framework | **Flutter 3.44+** | Single codebase → iOS + Android. |
+| Language | **Dart** | UI and MCTS engine in one language, no native bridge. |
+| State | **setState** (v1) → Riverpod (if complexity grows) | Keep it simple first. |
+| Local storage | **shared_preferences** | Save settings and stats. |
+| AI | **Custom MCTS** (pure Dart) | ~200 lines; no dependencies; tunable by time budget. |
 
 ---
 
@@ -121,21 +100,17 @@ Iterating on rules in Python takes minutes; iterating inside a half-built mobile
 ```
 lodestone/
 ├── README.md
-├── engine-prototype/            # Phase A — Python
-│   ├── lodestone/
-│   │   ├── board.py             # Board state, placement
-│   │   ├── rules.py             # Pull resolution + capture logic
-│   │   ├── game.py              # Turn loop, win conditions
-│   │   └── mcts.py              # The AI engine
-│   ├── tests/
-│   │   ├── test_rules.py        # Pull + capture edge cases
-│   │   └── test_mcts.py
-│   └── play_cli.py              # Play vs AI in the terminal
-│
-└── app/                         # Phase B — Flutter
+└── app/                         # Flutter app — iOS + Android
     ├── lib/
-    │   ├── engine/              # MCTS + rules, ported from Python
-    │   ├── ui/                  # Board widget, menus, animations
+    │   ├── engine/
+    │   │   ├── board.dart        # Board state, Player enum, helpers
+    │   │   ├── rules.dart        # Pull resolution + capture logic
+    │   │   ├── game.dart         # Turn loop, win conditions
+    │   │   └── mcts.dart         # MCTS AI engine
+    │   ├── ui/
+    │   │   ├── game_screen.dart  # Main game screen
+    │   │   ├── board_widget.dart # Interactive 7×7 grid
+    │   │   └── menu_screen.dart  # Difficulty picker + start screen
     │   └── main.dart
     ├── assets/
     └── pubspec.yaml
@@ -144,23 +119,6 @@ lodestone/
 ---
 
 ## Getting started
-
-### Engine prototype (Python)
-
-```bash
-cd engine-prototype
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install pytest
-
-# run the tests
-pytest
-
-# play against the AI in your terminal
-python play_cli.py
-```
-
-### Mobile app (Flutter)
 
 ```bash
 cd app
@@ -172,15 +130,13 @@ flutter run                      # runs on a connected device or emulator
 
 ## Roadmap
 
-**Milestone 1 — Rules on paper.** Write down every rule and edge case precisely (what happens when two stones could be pulled into the same cell? when a pull would cause a self-capture?). Ambiguity here will haunt the code.
+**Milestone 1 — Core engine (Dart).** Board, pull resolution, capture logic, win detection — all rule edge cases locked in and unit tested.
 
-**Milestone 2 — Playable prototype (text).** Python board + rules + a random-move opponent, played in the terminal. Goal: confirm the rules are consistent and the game is *fun*. Be ready to throw the first rule set away.
+**Milestone 2 — MCTS AI.** UCB1 search with time-based difficulty budget. Target: a move in under 1 second on mid-range hardware.
 
-**Milestone 3 — The AI.** Add the MCTS engine and tune its time budget so it's challenging but responds fast enough for a phone (target: a move in under ~1 second on mid-range hardware).
+**Milestone 3 — Playable Flutter UI.** Tap to place, animate pulls and captures, show captured counts, game-over screen.
 
-**Milestone 4 — Mobile port.** Rebuild the proven engine in Dart, then build the Flutter touch UI: tap a cell to place, animate the pulls, animate captures.
-
-**Milestone 5 — Playtest & polish.** Test with real people, add difficulty levels, sound, a tutorial, and onboarding. Then publish to the App Store and Google Play.
+**Milestone 4 — Playtest & polish.** Difficulty picker, sound, tutorial, onboarding. Then publish to App Store and Google Play.
 
 ---
 
