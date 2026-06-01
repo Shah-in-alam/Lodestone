@@ -1,9 +1,11 @@
-import 'dart:async';
+import 'dart:isolate';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../engine/board.dart';
 import '../engine/game.dart';
 import '../engine/mcts.dart';
 import 'board_widget.dart';
+import 'how_to_play_screen.dart';
 
 class GameScreen extends StatefulWidget {
   final String difficulty;
@@ -15,9 +17,10 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> {
   late Game _game;
-  bool _aiThinking = false;
-  Set<(int, int)> _pulledCells = {};
+  bool _busy = false;
   (int, int)? _lastPlaced;
+  Set<(int, int)> _pulledDests = {};
+  Map<(int, int), Player> _capturedStones = {};
 
   @override
   void initState() {
@@ -25,113 +28,182 @@ class _GameScreenState extends State<GameScreen> {
     _game = Game();
   }
 
-  void _onCellTap(int r, int c) {
-    if (_game.isOver || _aiThinking) return;
+  Future<void> _onCellTap(int r, int c) async {
+    if (_busy || _game.isOver) return;
     if (_game.currentPlayer != Player.amber) return;
     if (!_game.legalMoves().contains((r, c))) return;
 
+    HapticFeedback.lightImpact();
+    _busy = true;
+
+    final result = _game.applyMove(r, c);
+    await _animateMove((r, c), result);
+
+    if (_game.isOver) {
+      _busy = false;
+      if (mounted) _showResult();
+      return;
+    }
+
+    await _runAI();
+    _busy = false;
+  }
+
+  Future<void> _animateMove((int, int) placed, MoveResult result) async {
+    if (!mounted) return;
+
+    // Phase 1: show placed stone
     setState(() {
-      _lastPlaced = (r, c);
-      _pulledCells = _computePulledCells(r, c);
-      _game.applyMove(r, c);
+      _lastPlaced = placed;
+      _pulledDests = {};
+      _capturedStones = {};
     });
+    await Future.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
 
-    if (!_game.isOver) {
-      _runAI();
+    // Phase 2: pull glow
+    if (result.hasPulls) {
+      setState(() => _pulledDests = result.pullDests);
+      await Future.delayed(const Duration(milliseconds: 380));
+      if (!mounted) return;
+    }
+
+    // Phase 3: capture flash (show removed stones in red)
+    if (result.hasCaptures) {
+      setState(() {
+        _pulledDests = {};
+        _capturedStones = result.capturedStones;
+      });
+      await Future.delayed(const Duration(milliseconds: 380));
+      if (!mounted) return;
+      setState(() => _capturedStones = {});
+      await Future.delayed(const Duration(milliseconds: 80));
+      if (!mounted) return;
     } else {
-      _showResult();
+      setState(() => _pulledDests = {});
     }
   }
 
-  Set<(int, int)> _computePulledCells(int row, int col) {
-    // Snapshot which enemy cells moved by comparing before/after
-    final before = _game.board.copy();
-    const dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-    final pulled = <(int, int)>{};
-    for (final (dr, dc) in dirs) {
-      int r = row + dr, c = col + dc;
-      while (_game.board.onBoard(r, c)) {
+  Future<void> _runAI() async {
+    if (!mounted) return;
+    setState(() {});
+
+    final grid = List.generate(
+      boardSize,
+      (r) => List.generate(boardSize, (c) {
         final cell = _game.board.get(r, c);
-        if (cell == opponent(_game.currentPlayer)) {
-          final dest = (r - dr, c - dc);
-          if (_game.board.get(dest.$1, dest.$2) == null) {
-            pulled.add(dest);
-          }
-          break;
-        } else if (cell != null) {
-          break;
-        }
-        r += dr;
-        c += dc;
-      }
-    }
-    before; // suppress unused warning
-    return pulled;
-  }
-
-  void _runAI() async {
-    setState(() => _aiThinking = true);
-
-    final budget = difficultyBudgets[widget.difficulty] ?? 0.5;
-    final move = await compute(
-      (args) => mctsSearch(args.$1, args.$2),
-      (_game.copy(), budget),
+        return cell == null ? -1 : cell.index;
+      }),
     );
+    final amberCaps = _game.board.captures[Player.amber] ?? 0;
+    final slateCaps = _game.board.captures[Player.slate] ?? 0;
+    final cpIdx = _game.currentPlayer.index;
+    final budget = difficultyBudgets[widget.difficulty] ?? 0.5;
+
+    final move = await Isolate.run(() {
+      final g = Game();
+      for (int r = 0; r < boardSize; r++) {
+        for (int c = 0; c < boardSize; c++) {
+          if (grid[r][c] >= 0) {
+            g.board.set(r, c, Player.values[grid[r][c]]);
+          }
+        }
+      }
+      g.board.captures[Player.amber] = amberCaps;
+      g.board.captures[Player.slate] = slateCaps;
+      g.currentPlayer = Player.values[cpIdx];
+      return mctsSearch(g, budget);
+    });
 
     if (!mounted) return;
-    setState(() {
-      _aiThinking = false;
-      _lastPlaced = move;
-      _pulledCells = {};
-      _game.applyMove(move.$1, move.$2);
-    });
+    HapticFeedback.selectionClick();
 
-    if (_game.isOver) _showResult();
+    final aiResult = _game.applyMove(move.$1, move.$2);
+    await _animateMove(move, aiResult);
+
+    if (_game.isOver && mounted) _showResult();
   }
 
   void _showResult() {
-    final msg = switch (_game.result) {
-      GameResult.amberWins => 'You Win!',
-      GameResult.slateWins => 'AI Wins!',
-      GameResult.draw => 'Draw!',
-      null => '',
+    final (title, sub) = switch (_game.result) {
+      GameResult.amberWins => ('You Win!', 'Amber conquers Slate'),
+      GameResult.slateWins => ('AI Wins!', 'Slate conquers Amber'),
+      GameResult.draw => ("It's a Draw", 'Equal stones remain'),
+      null => ('', ''),
     };
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF2A2A4A),
-        title: Text(
-          msg,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Color(0xFFE8C97A),
-            fontSize: 28,
-            fontWeight: FontWeight.w800,
-          ),
+        backgroundColor: const Color(0xFF1E1E38),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFFE8C97A),
+                fontSize: 32,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              sub,
+              style: const TextStyle(color: Color(0xFF8888AA), fontSize: 14),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      Navigator.of(context).pop();
+                    },
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF8888AA),
+                      side: const BorderSide(color: Color(0xFF3A3A5A)),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: const Text('Menu'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      setState(() {
+                        _game = Game();
+                        _lastPlaced = null;
+                        _pulledDests = {};
+                        _capturedStones = {};
+                        _busy = false;
+                      });
+                    },
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFE8C97A),
+                      foregroundColor: const Color(0xFF1A1A2E),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: const Text('Play Again',
+                        style: TextStyle(fontWeight: FontWeight.w800)),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              setState(() {
-                _game = Game();
-                _pulledCells = {};
-                _lastPlaced = null;
-              });
-            },
-            child: const Text('Play Again',
-                style: TextStyle(color: Color(0xFFE8C97A))),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              Navigator.of(context).pop();
-            },
-            child: const Text('Menu',
-                style: TextStyle(color: Color(0xFF8888AA))),
-          ),
-        ],
       ),
     );
   }
@@ -140,28 +212,45 @@ class _GameScreenState extends State<GameScreen> {
   Widget build(BuildContext context) {
     final amberCaps = _game.board.captures[Player.amber] ?? 0;
     final slateCaps = _game.board.captures[Player.slate] ?? 0;
+    final isPlayerTurn =
+        _game.currentPlayer == Player.amber && !_busy && !_game.isOver;
+    final isAiTurn =
+        _game.currentPlayer == Player.slate || (_busy && !_game.isOver);
 
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1A1A2E),
         foregroundColor: const Color(0xFF8888AA),
+        elevation: 0,
         title: const Text(
           'LODESTONE',
           style: TextStyle(
             color: Color(0xFFE8C97A),
-            fontWeight: FontWeight.w800,
-            letterSpacing: 4,
+            fontWeight: FontWeight.w900,
+            fontSize: 18,
+            letterSpacing: 5,
           ),
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => setState(() {
-              _game = Game();
-              _pulledCells = {};
-              _lastPlaced = null;
-            }),
+            icon: const Icon(Icons.help_outline, size: 20),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const HowToPlayScreen()),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 20),
+            onPressed: _busy
+                ? null
+                : () => setState(() {
+                      _game = Game();
+                      _lastPlaced = null;
+                      _pulledDests = {};
+                      _capturedStones = {};
+                      _busy = false;
+                    }),
           ),
         ],
       ),
@@ -171,17 +260,27 @@ class _GameScreenState extends State<GameScreen> {
             _ScoreBar(
               amberCaps: amberCaps,
               slateCaps: slateCaps,
-              currentPlayer: _game.currentPlayer,
-              aiThinking: _aiThinking,
+              isPlayerTurn: isPlayerTurn,
+              isAiTurn: isAiTurn,
+              difficulty: widget.difficulty,
             ),
+            const SizedBox(height: 8),
             Expanded(
               child: BoardWidget(
                 board: _game.board,
-                highlightedCells: _pulledCells,
+                pulledCells: _pulledDests,
+                capturedStones: _capturedStones,
                 lastPlaced: _lastPlaced,
+                showHints: isPlayerTurn,
                 onTap: _onCellTap,
-                enabled: !_aiThinking && !_game.isOver,
+                enabled: isPlayerTurn,
               ),
+            ),
+            const SizedBox(height: 12),
+            _TurnLabel(
+              isPlayerTurn: isPlayerTurn,
+              isAiTurn: isAiTurn,
+              isOver: _game.isOver,
             ),
             const SizedBox(height: 16),
           ],
@@ -194,56 +293,56 @@ class _GameScreenState extends State<GameScreen> {
 class _ScoreBar extends StatelessWidget {
   final int amberCaps;
   final int slateCaps;
-  final Player currentPlayer;
-  final bool aiThinking;
+  final bool isPlayerTurn;
+  final bool isAiTurn;
+  final String difficulty;
 
   const _ScoreBar({
     required this.amberCaps,
     required this.slateCaps,
-    required this.currentPlayer,
-    required this.aiThinking,
+    required this.isPlayerTurn,
+    required this.isAiTurn,
+    required this.difficulty,
   });
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          _PlayerChip(
+          _PlayerPanel(
             label: 'YOU',
-            captures: amberCaps,
             color: const Color(0xFFE8C97A),
-            isActive: currentPlayer == Player.amber && !aiThinking,
+            captures: amberCaps,
+            isActive: isPlayerTurn,
           ),
-          Column(
-            children: [
-              Text(
-                aiThinking ? 'AI thinking...' : 'Captured',
-                style: TextStyle(
-                  color: aiThinking
-                      ? const Color(0xFF9999FF)
-                      : const Color(0xFF8888AA),
-                  fontSize: 11,
-                  letterSpacing: 1,
+          Expanded(
+            child: Column(
+              children: [
+                Text(
+                  difficulty.toUpperCase(),
+                  style: const TextStyle(
+                    color: Color(0xFF555577),
+                    fontSize: 10,
+                    letterSpacing: 2,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                'First to 4 wins',
-                style: const TextStyle(
-                  color: Color(0xFF555577),
-                  fontSize: 10,
+                const SizedBox(height: 2),
+                const Text(
+                  'first to 4 wins',
+                  style: TextStyle(color: Color(0xFF404060), fontSize: 10),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          _PlayerChip(
+          _PlayerPanel(
             label: 'AI',
-            captures: slateCaps,
             color: const Color(0xFF7A8BA8),
-            isActive: currentPlayer == Player.slate || aiThinking,
+            captures: slateCaps,
+            isActive: isAiTurn,
+            alignRight: true,
           ),
         ],
       ),
@@ -251,58 +350,102 @@ class _ScoreBar extends StatelessWidget {
   }
 }
 
-class _PlayerChip extends StatelessWidget {
+class _PlayerPanel extends StatelessWidget {
   final String label;
-  final int captures;
   final Color color;
+  final int captures;
   final bool isActive;
+  final bool alignRight;
 
-  const _PlayerChip({
+  const _PlayerPanel({
     required this.label,
-    required this.captures,
     required this.color,
+    required this.captures,
     required this.isActive,
+    this.alignRight = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final dots = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(4, (i) {
+        final filled = i < captures;
+        return Container(
+          width: 10,
+          height: 10,
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: filled ? color : Colors.transparent,
+            border: Border.all(
+              color: filled ? color : color.withValues(alpha: 0.25),
+              width: 1.5,
+            ),
+          ),
+        );
+      }),
+    );
+
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: isActive ? color.withValues(alpha: 0.15) : Colors.transparent,
-        borderRadius: BorderRadius.circular(20),
+        color: isActive ? color.withValues(alpha: 0.1) : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: isActive ? color : const Color(0xFF3A3A5A),
+          color: isActive ? color.withValues(alpha: 0.4) : Colors.transparent,
           width: 1.5,
         ),
       ),
       child: Column(
+        crossAxisAlignment:
+            alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
           Text(
             label,
             style: TextStyle(
               color: color,
-              fontSize: 12,
+              fontSize: 11,
               fontWeight: FontWeight.w800,
               letterSpacing: 2,
             ),
           ),
-          Text(
-            '$captures / 4',
-            style: TextStyle(
-              color: color.withValues(alpha: 0.8),
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
+          const SizedBox(height: 5),
+          dots,
         ],
       ),
     );
   }
 }
 
-// Runs mctsSearch on a background isolate so UI stays responsive.
-Future<T> compute<Q, T>(T Function(Q) callback, Q message) {
-  return Future(() => callback(message));
+class _TurnLabel extends StatelessWidget {
+  final bool isPlayerTurn;
+  final bool isAiTurn;
+  final bool isOver;
+
+  const _TurnLabel({
+    required this.isPlayerTurn,
+    required this.isAiTurn,
+    required this.isOver,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isOver) return const SizedBox.shrink();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      child: Text(
+        isPlayerTurn ? 'Your turn — tap a cell' : 'AI is thinking...',
+        key: ValueKey(isPlayerTurn),
+        style: TextStyle(
+          color: isPlayerTurn
+              ? const Color(0xFFE8C97A).withValues(alpha: 0.8)
+              : const Color(0xFF7A8BA8).withValues(alpha: 0.8),
+          fontSize: 13,
+          letterSpacing: 1,
+        ),
+      ),
+    );
+  }
 }
