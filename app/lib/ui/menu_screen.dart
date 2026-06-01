@@ -26,8 +26,8 @@ class _MenuScreenState extends State<MenuScreen> {
               children: [
                 // Logo / title
                 Container(
-                  width: 72,
-                  height: 72,
+                  width: 64,
+                  height: 64,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: const RadialGradient(
@@ -48,23 +48,22 @@ class _MenuScreenState extends State<MenuScreen> {
                   'LODESTONE',
                   style: TextStyle(
                     color: Color(0xFFE8C97A),
-                    fontSize: 36,
+                    fontSize: 32,
                     fontWeight: FontWeight.w900,
-                    letterSpacing: 8,
+                    letterSpacing: 6,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
                 const Text(
-                  'A minute to learn.\nA lifetime to master.',
+                  'A minute to learn. A lifetime to master.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Color(0xFF6666AA),
-                    fontSize: 13,
-                    height: 1.7,
-                    letterSpacing: 0.5,
+                    fontSize: 12,
+                    height: 1.5,
                   ),
                 ),
-                const SizedBox(height: 52),
+                const SizedBox(height: 36),
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
@@ -72,7 +71,7 @@ class _MenuScreenState extends State<MenuScreen> {
                     style: TextStyle(
                       color: Color(0xFF555577),
                       fontSize: 11,
-                      letterSpacing: 3,
+                      letterSpacing: 2,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
